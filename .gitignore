@@ -1,19 +1,9 @@
-# 모든 경로의 checkpoints* 폴더(및 그 안의 파일) 무시
-**/checkpoints*/
-checkpoints*/
-
-# (선택) 자주 큰 용량/불필요한 것들
-*.pt
-*.ckpt
-*.bin
-*.h5
-*.npz
-*.pkl
-*.log
-__pycache__/
-*.pyc
-.env
-.venv/
-runs/
-outputs/
+# ignore data & checkpoints
 data/
+exp/
+checkpoints/
+trash/
+federatedscope/trash/
+final_data_splits/
+checkpoints*/
+runs_logs/
