@@ -391,7 +391,7 @@ class LLMTrainer(GeneralTorchTrainer): #**Large Language Model (LLM)**을 학습
         self._set_round_ctx(round_num)  # ← 여기!
         # [수정] current_round를 맨 먼저 정의하여 NameError 해결
         current_round = round_num
-        import ipdb; ipdb.set_trace(context=15)
+
         # ★ CT-FT & baseline 옵션이면, 파인튜닝 시작 전에 1회 평가
         if self._ct_ft and self._mid_eval_every > 0 and bool(getattr(self.cfg.eval, "baseline_before_ft", True)):
             self._mid_eval_once()  # ← 아래 새 구현이 label/prob만 추출
@@ -1414,187 +1414,180 @@ class LLMTrainer(GeneralTorchTrainer): #**Large Language Model (LLM)**을 학습
         logger.info(f"[local-only] saved(best) -> {save_path}")
 
 
-    # def _mid_eval_once(self):
-    #     """
-    #     (간소화, Accelerate process=1 가정)
-    #     - test 로더를 강제 재빌드 후 즉시 사용
-    #     - new_labels != IGN 이 반드시 존재한다고 가정 -> 유효성 체크 제거
-    #     - p(A), label(A=1/B=0)만 CSV 저장
-    #     """
-    #     import os, csv, torch
-    #     import torch.nn.functional as F
+    def _mid_eval_once(self):
+        """
+        (간소화, Accelerate process=1 가정)
+        - test 로더를 강제 재빌드 후 즉시 사용
+        - new_labels != IGN 이 반드시 존재한다고 가정 -> 유효성 체크 제거
+        - p(A), label(A=1/B=0)만 CSV 저장
+        """
+        import os, csv, torch
+        import torch.nn.functional as F
 
-    #     using_accel = hasattr(self, "accelerator") and (self.accelerator is not None)
+        using_accel = hasattr(self, "accelerator") and (self.accelerator is not None)
 
-    #     # === 모델/디바이스 ===
-    #     if using_accel:
-    #         device = self.accelerator.device
-    #         model = self.model.eval()          # 래핑 그대로(unwrap 불필요)
-    #         self.accelerator.wait_for_everyone()
-    #     else:
-    #         model = self.model
-    #         device = next(model.parameters()).device
-    #         model = model.to(device).eval()
+        # === 모델/디바이스 ===
+        if using_accel:
+            device = self.accelerator.device
+            model = self.model.eval()          # 래핑 그대로(unwrap 불필요)
+            self.accelerator.wait_for_everyone()
+        else:
+            model = self.model
+            device = next(model.parameters()).device
+            model = model.to(device).eval()
 
-    #     # === test dataloader 강제 재빌드 → 즉시 사용 ===
-    #     self._reset_and_build_dataloader(target_data_split_name='test')
-    #     test_loader = self.data_split_loader['test']
-    #     if using_accel:
-    #         test_loader = self.accelerator.prepare(test_loader)
+        # === test dataloader 강제 재빌드 → 즉시 사용 ===
+        self._reset_and_build_dataloader(target_data_split_name='test')
+        test_loader = self.data_split_loader['test']
+        if using_accel:
+            test_loader = self.accelerator.prepare(test_loader)
 
-    #     # === choices 토큰 id: [A,B] 순서 전제 ===
-    #     choices_ids = self.choices.to(device)     # tensor([id_A, id_B], dtype=long)
-    #     IGN = -100
+        # === choices 토큰 id: [A,B] 순서 전제 ===
+        choices_ids = self.choices.to(device)     # tensor([id_A, id_B], dtype=long)
+        IGN = -100
 
-    #     p_buf, q_buf = [], []
+        p_buf, q_buf = [], []
 
-    #     with torch.no_grad():
-    #         for batch in test_loader:
-    #             input_ids = batch["input_ids"].to(device)
-    #             labels    = batch["labels"].to(device)
-    #             attn      = batch.get("attention_mask", None)
-    #             if attn is not None:
-    #                 attn = attn.to(device)
+        with torch.no_grad():
+            for batch in test_loader:
+                input_ids = batch["input_ids"].to(device)
+                labels    = batch["labels"].to(device)
+                attn      = batch.get("attention_mask", None)
+                if attn is not None:
+                    attn = attn.to(device)
 
-    #             # next-token 프레임
-    #             logits = model(input_ids=input_ids, attention_mask=attn).logits   # [B,T,V]
-    #             shift_logits = logits[..., :-1, :].contiguous()                   # [B,T-1,V]
-    #             shift_labels = labels[..., 1:].contiguous()                       # [B,T-1]
+                # next-token 프레임
+                logits = model(input_ids=input_ids, attention_mask=attn).logits   # [B,T,V]
+                shift_logits = logits[..., :-1, :].contiguous()                   # [B,T-1,V]
+                shift_labels = labels[..., 1:].contiguous()                       # [B,T-1]
 
-    #             # new_labels: A→0, B→1, 그 외 IGN (in-place 마스킹)
-    #             new_labels = torch.full_like(shift_labels, IGN)
-    #             new_labels[shift_labels == choices_ids[0]] = 0  # A
-    #             new_labels[shift_labels == choices_ids[1]] = 1  # B
+                # new_labels: A→0, B→1, 그 외 IGN (in-place 마스킹)
+                new_labels = torch.full_like(shift_labels, IGN)
+                new_labels[shift_labels == choices_ids[0]] = 0  # A
+                new_labels[shift_labels == choices_ids[1]] = 1  # B
 
-    #             # 첫 유효 위치 인덱스 (유효 토큰 존재한다고 가정)
-    #             first_pos = (new_labels != IGN).int().argmax(dim=1)   # [B]
-    #             sel_b = torch.arange(first_pos.size(0), device=device)
-    #             sel_t = first_pos
+                # 첫 유효 위치 인덱스 (유효 토큰 존재한다고 가정)
+                first_pos = (new_labels != IGN).int().argmax(dim=1)   # [B]
+                sel_b = torch.arange(first_pos.size(0), device=device)
+                sel_t = first_pos
 
-    #             # (A,B) 로짓만 추출 → softmax → p(A)
-    #             logits_ab  = torch.index_select(shift_logits, dim=-1, index=choices_ids)  # [B,T-1,2]
-    #             logits_1st = logits_ab[sel_b, sel_t, :]                                   # [B,2]
-    #             probs_ab   = F.softmax(logits_1st, dim=-1)                                # [B,2]
-    #             pA         = probs_ab[:, 0]                                               # [B]
+                # (A,B) 로짓만 추출 → softmax → p(A)
+                logits_ab  = torch.index_select(shift_logits, dim=-1, index=choices_ids)  # [B,T-1,2]
+                logits_1st = logits_ab[sel_b, sel_t, :]                                   # [B,2]
+                probs_ab   = F.softmax(logits_1st, dim=-1)                                # [B,2]
+                pA         = probs_ab[:, 0]                                               # [B]
 
-    #             # 라벨: new_labels 같은 위치가 0이면 A(=1), 1이면 B(=0)
-    #             lab_1st = new_labels[sel_b, sel_t]                                        # [B] {0,1}
-    #             q       = (lab_1st == 0).float()                                          # [B]
+                # 라벨: new_labels 같은 위치가 0이면 A(=1), 1이면 B(=0)
+                lab_1st = new_labels[sel_b, sel_t]                                        # [B] {0,1}
+                q       = (lab_1st == 0).float()                                          # [B]
 
-    #             p_buf.append(pA.cpu())
-    #             q_buf.append(q.cpu())
+                p_buf.append(pA.cpu())
+                q_buf.append(q.cpu())
 
-    #     if using_accel:
-    #         self.accelerator.wait_for_everyone()
+        if using_accel:
+            self.accelerator.wait_for_everyone()
 
-    #     # 결과 병합 및 저장
-    #     p_all = torch.cat(p_buf, dim=0).numpy()
-    #     q_all = torch.cat(q_buf, dim=0).numpy()
+        # 결과 병합 및 저장
+        p_all = torch.cat(p_buf, dim=0).numpy()
+        q_all = torch.cat(q_buf, dim=0).numpy()
 
-    #     outdir = getattr(self.cfg.eval, "outdir", "runs")
-    #     cid = int(getattr(getattr(self, "ctx", object()), "client_ID", 0))
-    #     out_csv = os.path.join(outdir, "probs", f"tgt_{cid:03d}.csv")
-    #     os.makedirs(os.path.dirname(out_csv), exist_ok=True)
-    #     with open(out_csv, "w", newline="", encoding="utf-8") as f:
-    #         w = csv.writer(f)
-    #         # 원하는 컬럼만
-    #         w.writerow(["id", "label_str", "pred_str", "p_A", "label_num"])
+        outdir = getattr(self.cfg.eval, "outdir", "runs")
+        cid = int(getattr(getattr(self, "ctx", object()), "client_ID", 0))
+        out_csv = os.path.join(outdir, "probs", f"src_{cid:03d}", f"tgt_{cid:03d}.csv")
+        os.makedirs(os.path.dirname(out_csv), exist_ok=True)
+        with open(out_csv, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["id","label","p_A","p_B"])
+            for idx, (pa, qq) in enumerate(zip(p_all, q_all)):
+                w.writerow([idx, "A" if qq >= 0.5 else "B", f"{float(pa):.8f}", f"{float(1.0-pa):.8f}"])
 
-    #         for idx, (pa, qq) in enumerate(zip(p_all, q_all)):
-    #             label_num = int(qq)                 # A=1, B=0
-    #             label_str = "A" if label_num == 1 else "B"
-    #             pred_num  = int(pa >= 0.5)          # 임계값 0.5
-    #             pred_str  = "A" if pred_num == 1 else "B"
+        if using_accel:
+            self.accelerator.wait_for_everyone()
 
-    #             w.writerow([idx, label_str, pred_str, f"{float(pa):.8f}", label_num])
-
-    #     if using_accel:
-    #         self.accelerator.wait_for_everyone()
-
-    # def _mid_eval_once(self):
-    #     """CT-FT에서 every_n_train_steps마다:
-    #     (1) train 스냅샷 -> 전 클라이언트 공용 파일에 append
-    #     (2) train 카운터 초기화
-    #     (3) val/test 평가 -> 클라이언트별 파일에 append
-    #     (4) val/test 카운터 초기화
-    #     """
+    def _mid_eval_once(self):
+        """CT-FT에서 every_n_train_steps마다:
+        (1) train 스냅샷 -> 전 클라이언트 공용 파일에 append
+        (2) train 카운터 초기화
+        (3) val/test 평가 -> 클라이언트별 파일에 append
+        (4) val/test 카운터 초기화
+        """
  
-    #     m = getattr(self.ctx, "model", None)
+        m = getattr(self.ctx, "model", None)
 
 
 
-    #     # ====== ⬇ 기존 본문 그대로 둠 (아래 줄부터 네 코드) ======
-    #     using_accel = hasattr(self, 'accelerator') and self.accelerator is not None
+        # ====== ⬇ 기존 본문 그대로 둠 (아래 줄부터 네 코드) ======
+        using_accel = hasattr(self, 'accelerator') and self.accelerator is not None
 
         
-    #     if using_accel:
-    #         self.accelerator.wait_for_everyone()
-    #     is_main = (not using_accel) or self.accelerator.is_main_process
+        if using_accel:
+            self.accelerator.wait_for_everyone()
+        is_main = (not using_accel) or self.accelerator.is_main_process
 
-    #     cid  = int(getattr(getattr(self, "ctx", object()), "client_ID", 0))
-    #     rnd  = int(getattr(getattr(self, "ctx", object()), "round", 0))
-    #     step = int(getattr(self, "_global_updates", 0))
-    #     adapter_idx = getattr(getattr(self, "ctx", object()), "current_adapter_idx", None)
+        cid  = int(getattr(getattr(self, "ctx", object()), "client_ID", 0))
+        rnd  = int(getattr(getattr(self, "ctx", object()), "round", 0))
+        step = int(getattr(self, "_global_updates", 0))
+        adapter_idx = getattr(getattr(self, "ctx", object()), "current_adapter_idx", None)
 
-    #     outdir = getattr(self.cfg.eval, "outdir", "runs")
-    #     os.makedirs(outdir, exist_ok=True)
+        outdir = getattr(self.cfg.eval, "outdir", "runs")
+        os.makedirs(outdir, exist_ok=True)
 
-    #     per_client_path = os.path.join(outdir, f"mid_eval/client_{cid:03d}.raw")
-    #     os.makedirs(os.path.dirname(per_client_path), exist_ok=True)
-
-
-
-    #     for sp in ['test']:
-    #         self._reset_split_counters(sp)
-    #         if using_accel:
-    #             self.accelerator.wait_for_everyone()
-
-    #         out = self.evaluate(target_data_split_name=sp)
-
-    #         if is_main and isinstance(out, dict):
-    #             rec = {
-    #                 "client": cid, "round": rnd, "step": step,
-    #                 "phase": "mid", "split": sp,
-    #                 "adapter_idx": (int(adapter_idx) if adapter_idx is not None else None),
-    #                 "total":    out.get(f"{sp}_total", 0),
-    #                 "loss":     out.get(f"{sp}_loss", 0.0),
-    #                 "avg_loss": out.get(f"{sp}_avg_loss", 0.0),
-    #                 "seen":     out.get(f"{sp}_seen", 0),
-    #                 "correct":  out.get(f"{sp}_correct", 0),
-    #                 "acc":      out.get(f"{sp}_acc", 0.0),
-    #             }
-    #             with open(per_client_path, "a", encoding="utf-8") as f:
-    #                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-
-    #         # ⬇️ ES는 test일 때(그리고 CT-FT일 때)만 수행
-    #         if self._ct_ft and sp == 'test' and self._es_enabled and isinstance(out, dict):
-    #             # acc 키를 견고하게 가져오기 (우선순위: test_acc -> f'{sp}_acc' -> acc)
-    #             cur_acc = float(out['test_acc'])  # 여기 고정!
-
-    #             if cur_acc > (self._es_best + self._es_min_delta):
-    #                 self._es_best = cur_acc
-    #                 self._es_wait = 0
-    #                 if is_main:
-    #                     logger.info(f"[EarlyStop] new best test_acc={cur_acc:.6f}")
-    #                 self._save_best_local_only()
-    #             else:
-    #                 self._es_wait += 1
-    #                 if is_main:
-    #                     logger.info(f"[EarlyStop] no improvement (wait={self._es_wait}/{self._es_patience}), "
-    #                                 f"best={self._es_best:.6f}, curr={cur_acc:.6f}")
-    #                 if self._es_wait >= self._es_patience:
-    #                     self._es_triggered = True
-    #                     if is_main:
-    #                         logger.info("[EarlyStop] patience reached -> request stop")
-
-    #         # 마지막에 카운터 리셋
-    #         self._reset_split_counters(sp)
+        per_client_path = os.path.join(outdir, f"mid_eval/client_{cid:03d}.raw")
+        os.makedirs(os.path.dirname(per_client_path), exist_ok=True)
 
 
 
-    #     if using_accel:
-    #         self.accelerator.wait_for_everyone()
-    #     # ====== ⬆ 기존 본문 그대로 둠 ======
+        for sp in ['test']:
+            self._reset_split_counters(sp)
+            if using_accel:
+                self.accelerator.wait_for_everyone()
+
+            out = self.evaluate(target_data_split_name=sp)
+
+            if is_main and isinstance(out, dict):
+                rec = {
+                    "client": cid, "round": rnd, "step": step,
+                    "phase": "mid", "split": sp,
+                    "adapter_idx": (int(adapter_idx) if adapter_idx is not None else None),
+                    "total":    out.get(f"{sp}_total", 0),
+                    "loss":     out.get(f"{sp}_loss", 0.0),
+                    "avg_loss": out.get(f"{sp}_avg_loss", 0.0),
+                    "seen":     out.get(f"{sp}_seen", 0),
+                    "correct":  out.get(f"{sp}_correct", 0),
+                    "acc":      out.get(f"{sp}_acc", 0.0),
+                }
+                with open(per_client_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+            # ⬇️ ES는 test일 때(그리고 CT-FT일 때)만 수행
+            if self._ct_ft and sp == 'test' and self._es_enabled and isinstance(out, dict):
+                # acc 키를 견고하게 가져오기 (우선순위: test_acc -> f'{sp}_acc' -> acc)
+                cur_acc = float(out['test_acc'])  # 여기 고정!
+
+                if cur_acc > (self._es_best + self._es_min_delta):
+                    self._es_best = cur_acc
+                    self._es_wait = 0
+                    if is_main:
+                        logger.info(f"[EarlyStop] new best test_acc={cur_acc:.6f}")
+                    self._save_best_local_only()
+                else:
+                    self._es_wait += 1
+                    if is_main:
+                        logger.info(f"[EarlyStop] no improvement (wait={self._es_wait}/{self._es_patience}), "
+                                    f"best={self._es_best:.6f}, curr={cur_acc:.6f}")
+                    if self._es_wait >= self._es_patience:
+                        self._es_triggered = True
+                        if is_main:
+                            logger.info("[EarlyStop] patience reached -> request stop")
+
+            # 마지막에 카운터 리셋
+            self._reset_split_counters(sp)
+
+
+
+        if using_accel:
+            self.accelerator.wait_for_everyone()
+        # ====== ⬆ 기존 본문 그대로 둠 ======
 
 
     def _reset_split_counters(self, split: str):

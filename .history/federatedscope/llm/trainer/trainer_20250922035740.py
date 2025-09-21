@@ -391,7 +391,7 @@ class LLMTrainer(GeneralTorchTrainer): #**Large Language Model (LLM)**을 학습
         self._set_round_ctx(round_num)  # ← 여기!
         # [수정] current_round를 맨 먼저 정의하여 NameError 해결
         current_round = round_num
-        import ipdb; ipdb.set_trace(context=15)
+
         # ★ CT-FT & baseline 옵션이면, 파인튜닝 시작 전에 1회 평가
         if self._ct_ft and self._mid_eval_every > 0 and bool(getattr(self.cfg.eval, "baseline_before_ft", True)):
             self._mid_eval_once()  # ← 아래 새 구현이 label/prob만 추출
@@ -1414,102 +1414,102 @@ class LLMTrainer(GeneralTorchTrainer): #**Large Language Model (LLM)**을 학습
         logger.info(f"[local-only] saved(best) -> {save_path}")
 
 
-    # def _mid_eval_once(self):
-    #     """
-    #     (간소화, Accelerate process=1 가정)
-    #     - test 로더를 강제 재빌드 후 즉시 사용
-    #     - new_labels != IGN 이 반드시 존재한다고 가정 -> 유효성 체크 제거
-    #     - p(A), label(A=1/B=0)만 CSV 저장
-    #     """
-    #     import os, csv, torch
-    #     import torch.nn.functional as F
+    def _mid_eval_once(self):
+        """
+        (간소화, Accelerate process=1 가정)
+        - test 로더를 강제 재빌드 후 즉시 사용
+        - new_labels != IGN 이 반드시 존재한다고 가정 -> 유효성 체크 제거
+        - p(A), label(A=1/B=0)만 CSV 저장
+        """
+        import os, csv, torch
+        import torch.nn.functional as F
 
-    #     using_accel = hasattr(self, "accelerator") and (self.accelerator is not None)
+        using_accel = hasattr(self, "accelerator") and (self.accelerator is not None)
 
-    #     # === 모델/디바이스 ===
-    #     if using_accel:
-    #         device = self.accelerator.device
-    #         model = self.model.eval()          # 래핑 그대로(unwrap 불필요)
-    #         self.accelerator.wait_for_everyone()
-    #     else:
-    #         model = self.model
-    #         device = next(model.parameters()).device
-    #         model = model.to(device).eval()
+        # === 모델/디바이스 ===
+        if using_accel:
+            device = self.accelerator.device
+            model = self.model.eval()          # 래핑 그대로(unwrap 불필요)
+            self.accelerator.wait_for_everyone()
+        else:
+            model = self.model
+            device = next(model.parameters()).device
+            model = model.to(device).eval()
 
-    #     # === test dataloader 강제 재빌드 → 즉시 사용 ===
-    #     self._reset_and_build_dataloader(target_data_split_name='test')
-    #     test_loader = self.data_split_loader['test']
-    #     if using_accel:
-    #         test_loader = self.accelerator.prepare(test_loader)
+        # === test dataloader 강제 재빌드 → 즉시 사용 ===
+        self._reset_and_build_dataloader(target_data_split_name='test')
+        test_loader = self.data_split_loader['test']
+        if using_accel:
+            test_loader = self.accelerator.prepare(test_loader)
 
-    #     # === choices 토큰 id: [A,B] 순서 전제 ===
-    #     choices_ids = self.choices.to(device)     # tensor([id_A, id_B], dtype=long)
-    #     IGN = -100
+        # === choices 토큰 id: [A,B] 순서 전제 ===
+        choices_ids = self.choices.to(device)     # tensor([id_A, id_B], dtype=long)
+        IGN = -100
 
-    #     p_buf, q_buf = [], []
+        p_buf, q_buf = [], []
 
-    #     with torch.no_grad():
-    #         for batch in test_loader:
-    #             input_ids = batch["input_ids"].to(device)
-    #             labels    = batch["labels"].to(device)
-    #             attn      = batch.get("attention_mask", None)
-    #             if attn is not None:
-    #                 attn = attn.to(device)
+        with torch.no_grad():
+            for batch in test_loader:
+                input_ids = batch["input_ids"].to(device)
+                labels    = batch["labels"].to(device)
+                attn      = batch.get("attention_mask", None)
+                if attn is not None:
+                    attn = attn.to(device)
 
-    #             # next-token 프레임
-    #             logits = model(input_ids=input_ids, attention_mask=attn).logits   # [B,T,V]
-    #             shift_logits = logits[..., :-1, :].contiguous()                   # [B,T-1,V]
-    #             shift_labels = labels[..., 1:].contiguous()                       # [B,T-1]
+                # next-token 프레임
+                logits = model(input_ids=input_ids, attention_mask=attn).logits   # [B,T,V]
+                shift_logits = logits[..., :-1, :].contiguous()                   # [B,T-1,V]
+                shift_labels = labels[..., 1:].contiguous()                       # [B,T-1]
 
-    #             # new_labels: A→0, B→1, 그 외 IGN (in-place 마스킹)
-    #             new_labels = torch.full_like(shift_labels, IGN)
-    #             new_labels[shift_labels == choices_ids[0]] = 0  # A
-    #             new_labels[shift_labels == choices_ids[1]] = 1  # B
+                # new_labels: A→0, B→1, 그 외 IGN (in-place 마스킹)
+                new_labels = torch.full_like(shift_labels, IGN)
+                new_labels[shift_labels == choices_ids[0]] = 0  # A
+                new_labels[shift_labels == choices_ids[1]] = 1  # B
 
-    #             # 첫 유효 위치 인덱스 (유효 토큰 존재한다고 가정)
-    #             first_pos = (new_labels != IGN).int().argmax(dim=1)   # [B]
-    #             sel_b = torch.arange(first_pos.size(0), device=device)
-    #             sel_t = first_pos
+                # 첫 유효 위치 인덱스 (유효 토큰 존재한다고 가정)
+                first_pos = (new_labels != IGN).int().argmax(dim=1)   # [B]
+                sel_b = torch.arange(first_pos.size(0), device=device)
+                sel_t = first_pos
 
-    #             # (A,B) 로짓만 추출 → softmax → p(A)
-    #             logits_ab  = torch.index_select(shift_logits, dim=-1, index=choices_ids)  # [B,T-1,2]
-    #             logits_1st = logits_ab[sel_b, sel_t, :]                                   # [B,2]
-    #             probs_ab   = F.softmax(logits_1st, dim=-1)                                # [B,2]
-    #             pA         = probs_ab[:, 0]                                               # [B]
+                # (A,B) 로짓만 추출 → softmax → p(A)
+                logits_ab  = torch.index_select(shift_logits, dim=-1, index=choices_ids)  # [B,T-1,2]
+                logits_1st = logits_ab[sel_b, sel_t, :]                                   # [B,2]
+                probs_ab   = F.softmax(logits_1st, dim=-1)                                # [B,2]
+                pA         = probs_ab[:, 0]                                               # [B]
 
-    #             # 라벨: new_labels 같은 위치가 0이면 A(=1), 1이면 B(=0)
-    #             lab_1st = new_labels[sel_b, sel_t]                                        # [B] {0,1}
-    #             q       = (lab_1st == 0).float()                                          # [B]
+                # 라벨: new_labels 같은 위치가 0이면 A(=1), 1이면 B(=0)
+                lab_1st = new_labels[sel_b, sel_t]                                        # [B] {0,1}
+                q       = (lab_1st == 0).float()                                          # [B]
 
-    #             p_buf.append(pA.cpu())
-    #             q_buf.append(q.cpu())
+                p_buf.append(pA.cpu())
+                q_buf.append(q.cpu())
 
-    #     if using_accel:
-    #         self.accelerator.wait_for_everyone()
+        if using_accel:
+            self.accelerator.wait_for_everyone()
 
-    #     # 결과 병합 및 저장
-    #     p_all = torch.cat(p_buf, dim=0).numpy()
-    #     q_all = torch.cat(q_buf, dim=0).numpy()
+        # 결과 병합 및 저장
+        p_all = torch.cat(p_buf, dim=0).numpy()
+        q_all = torch.cat(q_buf, dim=0).numpy()
 
-    #     outdir = getattr(self.cfg.eval, "outdir", "runs")
-    #     cid = int(getattr(getattr(self, "ctx", object()), "client_ID", 0))
-    #     out_csv = os.path.join(outdir, "probs", f"tgt_{cid:03d}.csv")
-    #     os.makedirs(os.path.dirname(out_csv), exist_ok=True)
-    #     with open(out_csv, "w", newline="", encoding="utf-8") as f:
-    #         w = csv.writer(f)
-    #         # 원하는 컬럼만
-    #         w.writerow(["id", "label_str", "pred_str", "p_A", "label_num"])
+        outdir = getattr(self.cfg.eval, "outdir", "runs")
+        cid = int(getattr(getattr(self, "ctx", object()), "client_ID", 0))
+        out_csv = os.path.join(outdir, "probs", f"tgt_{cid:03d}.csv")
+        os.makedirs(os.path.dirname(out_csv), exist_ok=True)
+        with open(out_csv, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            # 원하는 컬럼만
+            w.writerow(["id", "label_str", "pred_str", "p_A", "label_num"])
 
-    #         for idx, (pa, qq) in enumerate(zip(p_all, q_all)):
-    #             label_num = int(qq)                 # A=1, B=0
-    #             label_str = "A" if label_num == 1 else "B"
-    #             pred_num  = int(pa >= 0.5)          # 임계값 0.5
-    #             pred_str  = "A" if pred_num == 1 else "B"
+            for idx, (pa, qq) in enumerate(zip(p_all, q_all)):
+                label_num = int(qq)                 # A=1, B=0
+                label_str = "A" if label_num == 1 else "B"
+                pred_num  = int(pa >= 0.5)          # 임계값 0.5
+                pred_str  = "A" if pred_num == 1 else "B"
 
-    #             w.writerow([idx, label_str, pred_str, f"{float(pa):.8f}", label_num])
+                w.writerow([idx, label_str, pred_str, f"{float(pa):.8f}", label_num])
 
-    #     if using_accel:
-    #         self.accelerator.wait_for_everyone()
+        if using_accel:
+            self.accelerator.wait_for_everyone()
 
     # def _mid_eval_once(self):
     #     """CT-FT에서 every_n_train_steps마다:
@@ -1597,16 +1597,16 @@ class LLMTrainer(GeneralTorchTrainer): #**Large Language Model (LLM)**을 학습
     #     # ====== ⬆ 기존 본문 그대로 둠 ======
 
 
-    def _reset_split_counters(self, split: str):
-        """해당 split의 누적 카운터를 0으로 초기화."""
-        setattr(self.ctx, f'num_samples_{split}', 0)
-        setattr(self.ctx, f'loss_total_{split}', 0.0)
-        # 공용 집계(정확도용)
-        self.ctx.sample_seen = 0
-        self.ctx.sample_correct_accum = 0
-        # (옵션) 로컬 스냅샷 캐시
-        if hasattr(self.ctx, 'local_results_for_log'):
-            self.ctx.local_results_for_log = {}
+    # def _reset_split_counters(self, split: str):
+    #     """해당 split의 누적 카운터를 0으로 초기화."""
+    #     setattr(self.ctx, f'num_samples_{split}', 0)
+    #     setattr(self.ctx, f'loss_total_{split}', 0.0)
+    #     # 공용 집계(정확도용)
+    #     self.ctx.sample_seen = 0
+    #     self.ctx.sample_correct_accum = 0
+    #     # (옵션) 로컬 스냅샷 캐시
+    #     if hasattr(self.ctx, 'local_results_for_log'):
+    #         self.ctx.local_results_for_log = {}
 
     def _train_snapshot_metrics(self):
         """현재까지의 train 누적값을 reduce해서 그대로 반환(윈도우/prev 없음)."""

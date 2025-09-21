@@ -56,8 +56,7 @@ def cal_loss(logits, labels, choices):
     # 2) 라벨 맵핑: A/B 토큰이 등장한 자리만 클래스 인덱스(0/1)로 바꾸고 나머지는 IGN(-100
     new_labels = torch.full_like(shift_labels, DefaultToken.IGNORE_INDEX.value) #[-100, -100, -100, -100, -100, -100]으로 초기화
     for idx, choice in enumerate(choices): # 예: [ID('▁A'), ID('▁B')]
-        mask = (shift_labels == choice)
-        new_labels[mask] = idx
+        mask = (shift_labels == choice); new_labels[mask] = idx
     #mask->[False, False, False, False,  True, False]
     #new_labels = [-100, -100, -100, -100, 0, -100]
 

@@ -40,7 +40,7 @@ train:
     # lr: 0.000001
     type: AdamW
     betas: (0.9, 0.95)
-    lr: 0.0
+    lr: 0.00001
   is_enable_half: True # bf16/half 사용 플래그(Accelerate가 처리)
 
 criterion:
@@ -51,14 +51,14 @@ trainer:
   choices: ['A', 'B']
 
 eval:
-  split: ['test']
+  split: ['val', 'test']
   metrics: ['loss', 'acc']
   count_flops: False
-  outdir: exp/tldr/choice_qwen/cluster/local_only_1.0/raw  # raw 로그 저장 루트
+  outdir: exp/tldr/choice_qwen/ensemble/local_only_1.0/raw  # raw 로그 저장 루트
   # CT-FT(1라운드)에서 mid-eval 스텝 단위로 기록 (train/eval 모두 raw로 남김)
   every_n_train_steps: 10       # 10, 20, 30스텝에 mid-eval + train 스냅샷 기록
   baseline_before_ft: True      # 파인튜닝 시작 전(step=0) 베이스라인 기록
   local_only: True      # 파인튜닝 시작 전(step=0) 베이스라인 기록
 
-outdir: exp/tldr/choice_qwen/cluster/local_only_1.0
+outdir: exp/tldr/choice_qwen/ensemble/local_only_1.0
 expname: ""

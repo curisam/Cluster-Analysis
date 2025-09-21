@@ -391,7 +391,7 @@ class LLMTrainer(GeneralTorchTrainer): #**Large Language Model (LLM)**을 학습
         self._set_round_ctx(round_num)  # ← 여기!
         # [수정] current_round를 맨 먼저 정의하여 NameError 해결
         current_round = round_num
-        import ipdb; ipdb.set_trace(context=15)
+
         # ★ CT-FT & baseline 옵션이면, 파인튜닝 시작 전에 1회 평가
         if self._ct_ft and self._mid_eval_every > 0 and bool(getattr(self.cfg.eval, "baseline_before_ft", True)):
             self._mid_eval_once()  # ← 아래 새 구현이 label/prob만 추출
